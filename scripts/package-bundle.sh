@@ -11,7 +11,9 @@ mkdir -p -- "$2"
 output_dir=$(cd -- "$2" && pwd)
 sdk_dir=$(cd -- "$3" && pwd)
 glew_dir=$(cd -- "$4" && pwd)
-commit=$(git -C "$repo_dir" rev-parse --short=12 HEAD)
+# Container checkouts may belong to the runner's UID. Trust only this source
+# directory for this command; checkout's temporary Git config is not persistent.
+commit=$(git -c safe.directory="$repo_dir" -C "$repo_dir" rev-parse --short=12 HEAD)
 bundle_name="kde-widget-live2d-linux-$(uname -m)-$commit"
 work_dir=$(mktemp -d)
 trap 'rm -rf -- "$work_dir"' EXIT
