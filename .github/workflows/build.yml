@@ -1,0 +1,97 @@
+name: Build plugin
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  archlinux:
+    name: Arch Linux x86_64 · Vulkan + OpenGL
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      QT_QPA_PLATFORM: offscreen
+      XDG_RUNTIME_DIR: /tmp/live2d-runtime
+
+    steps:
+      - name: Install build and test dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git cmake ninja curl unzip python \
+            qt6-base qt6-declarative qt6-svg qt6-wayland \
+            libplasma kirigami ttf-dejavu \
+            mesa vulkan-headers vulkan-icd-loader vulkan-swrast shaderc
+          install -d -m 700 "$XDG_RUNTIME_DIR"
+
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Fetch verified SDK and EGL GLEW sources
+        run: |
+          deps_dir="$RUNNER_TEMP/live2d-deps"
+          bash scripts/ci-fetch-deps.sh "$deps_dir"
+          printf 'CUBISM_SDK_ROOT=%s\n' "$deps_dir/CubismSdkForNative-5-r.5" >> "$GITHUB_ENV"
+          printf 'GLEW_SOURCE_ROOT=%s\n' "$deps_dir/glew-2.2.0" >> "$GITHUB_ENV"
+
+      - name: Configure both renderers and model tests
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCUBISM_SDK_ROOT="$CUBISM_SDK_ROOT" \
+            -DGLEW_SOURCE_ROOT="$GLEW_SOURCE_ROOT" \
+            -DLIVE2D_BUILD_VULKAN=ON \
+            -DBUILD_TESTING=ON \
+            -DLIVE2D_TEST_MODEL="$CUBISM_SDK_ROOT/Samples/Resources/Haru/Haru.model3.json"
+
+      - name: Build
+        run: cmake --build build --parallel 2
+
+      - name: Test with Mesa software OpenGL and lavapipe
+        run: |
+          lvp_icd=$(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -print -quit)
+          test -n "$lvp_icd"
+          export VK_DRIVER_FILES="$lvp_icd"
+          ctest --test-dir build --output-on-failure --timeout 90
+
+      - name: Package plugin and install script
+        run: bash scripts/package-bundle.sh build dist "$CUBISM_SDK_ROOT" "$GLEW_SOURCE_ROOT"
+
+      - name: Upload installable bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kde-widget-live2d-archlinux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-diagnostics-archlinux-x86_64
+          path: |
+            build/Testing/Temporary/
+            build/presentation-*.png
+            build/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+          retention-days: 7

@@ -30,7 +30,15 @@
 
 # 安装部件
 
-在release中下载小部件，然后在kde添加小部件添加到你的桌面上就行了
+在 GitHub **Actions → Build plugin → 成功的运行 → Artifacts** 下载 `kde-widget-live2d-archlinux-x86_64`，解开下载的 ZIP，再解开里面的 `.tar.gz`，进入目录执行：
+
+```sh
+bash install.sh
+```
+
+默认安装到 `~/.local`。按照脚本输出的命令重启 Plasma 桌面后，在“添加小部件”中选择 **Live2D 桌面伙伴**。这是包含 C++ 原生插件和渲染程序的安装包，不能直接用“从本地文件安装小部件”导入。可执行 `bash install.sh /absolute/install/prefix` 指定安装目录。
+
+自动构建的二进制面向最新 Arch Linux x86_64，需要系统 Qt、Plasma 和显卡驱动；其他发行版或较旧 Qt 环境建议从源码构建。包内的 `BUILD-INFO.txt` 记录构建环境版本。不包含 SDK 源码或示例模型；使用时选择自己的 `.model3.json`。
 
 # 预览
 
@@ -66,6 +74,29 @@ ctest --test-dir build --output-on-failure
 默认使用系统 GLEW。若 GLEW 的 GLX 初始化影响 EGL，可下载 GLEW 2.2.0 源码并加 `-DGLEW_SOURCE_ROOT=/absolute/path/to/glew-2.2.0`，项目会按 EGL 模式编译它。
 
 SDK R5 的 Vulkan 路径需要修正着色器加载、深度清除值、深度图像布局、屏障目标阶段和资源销毁。构建通过 [cmake/CubismVulkanFixes.cmake](cmake/CubismVulkanFixes.cmake) 在构建目录生成修正后的源文件，不修改外部 SDK。着色器嵌入各自的 helper 程序，运行不依赖 SDK 目录或工作目录。切换 SDK 版本前需重新审查这些修正。
+
+## GitHub Actions 自动构建
+
+[Build plugin](.github/workflows/build.yml) 在推送、Pull Request 和手动运行时执行，无需配置 Secrets。在 GitHub Actions 页面选择 **Build plugin → Run workflow** 也可以手动构建。
+
+流程使用 Arch Linux 容器安装依赖，下载固定版本的 **Cubism Native 5 R5 / GLEW 2.2.0** 并校验 SHA-256，再编译 OpenGL、原生 Vulkan 后端和预览程序。GLEW 从源码按 EGL 模式静态编译，避免依赖 GLX 初始化。测试使用 Mesa 软件 OpenGL 和 lavapipe，并使用 SDK 的 Haru 模型验证真实渲染；测试模型不会进入安装包。
+
+测试通过后上传 `.tar.gz` 安装包和校验文件，保留 14 天；失败时上传测试日志供排查。包中包含小部件、QML 原生插件、两个渲染程序、预览程序、安装脚本及第三方许可。流程只上传 Actions 构建产物，不自动创建 GitHub Release。
+
+脚本也可以本地使用，需先安装上述开发依赖：
+
+```sh
+bash scripts/ci-fetch-deps.sh /tmp/live2d-deps
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_LIBDIR=lib \
+  -DCUBISM_SDK_ROOT=/tmp/live2d-deps/CubismSdkForNative-5-r.5 \
+  -DGLEW_SOURCE_ROOT=/tmp/live2d-deps/glew-2.2.0
+cmake --build build -j
+bash scripts/package-bundle.sh build dist \
+  /tmp/live2d-deps/CubismSdkForNative-5-r.5 /tmp/live2d-deps/glew-2.2.0
+```
+
+SDK/GLEW 的下载地址及摘要固定在 `scripts/ci-fetch-deps.sh`；升级 SDK 时需要同步审查 Vulkan 修正。自动下载仅用于 CI 和显式调用此脚本，普通 CMake 构建仍使用你指定的 SDK 目录。
 
 ## 预览模型
 
