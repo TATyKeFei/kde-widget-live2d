@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0 http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+    <kcfgfile name=""/>
+    <group name="General">
+        <entry name="modelPath" type="String"><default></default></entry>
+        <entry name="renderBackend" type="String"><default>auto</default></entry>
+        <entry name="running" type="Bool"><default>true</default></entry>
+        <entry name="followCursor" type="Bool"><default>true</default></entry>
+        <!-- Empty migrates the old checkbox on first use. -->
+        <entry name="cursorFollowMode" type="String"><default></default></entry>
+        <entry name="frameRate" type="Int"><default>30</default><min>1</min><max>60</max></entry>
+        <entry name="zoom" type="Double"><default>1.0</default><min>0.25</min><max>3.0</max></entry>
+        <entry name="idleGroup" type="String"><default>Idle</default></entry>
+    </group>
+</kcfg>

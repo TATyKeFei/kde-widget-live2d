@@ -1,0 +1,16 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Id": "org.kde.plasma.live2d",
+        "Name": "Live2D Companion",
+        "Name[zh_CN]": "Live2D 桌面伙伴",
+        "Description": "A Live2D character on your desktop, rendered with Cubism Native",
+        "Description[zh_CN]": "使用 Cubism Native 渲染的 Live2D 桌面角色",
+        "Icon": "face-smile",
+        "Category": "Fun and Games",
+        "License": "GPL-3.0-or-later",
+        "Version": "0.1.0",
+        "Authors": [{ "Name": "kde-widget-live2d contributors" }]
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}
