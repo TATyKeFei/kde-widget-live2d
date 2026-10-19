@@ -23,7 +23,9 @@ Item {
 
             Kirigami.FormLayout {
                 id: form
-                anchors.centerIn: parent
+                anchors.top: parent.top
+                anchors.topMargin: Kirigami.Units.largeSpacing * 2
+                anchors.horizontalCenter: parent.horizontalCenter
                 width: Math.max(0, Math.min(root.implicitWidth,
                                           parent.width - Kirigami.Units.largeSpacing * 4))
                 // Bound the internal grid too: long help text must wrap instead
