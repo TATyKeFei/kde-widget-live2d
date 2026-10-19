@@ -1,4 +1,5 @@
 #include "graphicscontext.h"
+#include "renderprotocol.h"
 #include <QDebug>
 #include <Rendering/Vulkan/CubismRenderer_Vulkan.hpp>
 #include <algorithm>
@@ -43,28 +44,18 @@ class VulkanContext final : public GraphicsContext
     }
     void submit(const std::function<void(VkCommandBuffer)> &record)
     {
-        VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-        allocation.commandPool = pool;
-        allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocation.commandBufferCount = 1;
-        VkCommandBuffer command = VK_NULL_HANDLE;
-        check(vkAllocateCommandBuffers(device, &allocation, &command), "分配 Vulkan 命令缓冲");
-        try {
-            VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            check(vkBeginCommandBuffer(command, &begin), "开始 Vulkan 命令");
-            record(command);
-            check(vkEndCommandBuffer(command), "结束 Vulkan 命令");
-            VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            info.commandBufferCount = 1;
-            info.pCommandBuffers = &command;
-            check(vkQueueSubmit(queue, 1, &info, VK_NULL_HANDLE), "提交 Vulkan 命令");
-            check(vkQueueWaitIdle(queue), "等待 Vulkan 命令");
-        } catch (...) {
-            vkFreeCommandBuffers(device, pool, 1, &command);
-            throw;
-        }
-        vkFreeCommandBuffers(device, pool, 1, &command);
+        check(vkResetCommandBuffer(transferCommand, 0), "重置 Vulkan 传输命令");
+        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        check(vkBeginCommandBuffer(transferCommand, &begin), "开始 Vulkan 命令");
+        record(transferCommand);
+        check(vkEndCommandBuffer(transferCommand), "结束 Vulkan 命令");
+        check(vkResetFences(device, 1, &transferFence), "重置 Vulkan 传输同步");
+        VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        info.commandBufferCount = 1;
+        info.pCommandBuffers = &transferCommand;
+        check(vkQueueSubmit(queue, 1, &info, transferFence), "提交 Vulkan 命令");
+        check(vkWaitForFences(device, 1, &transferFence, VK_TRUE, UINT64_MAX), "等待 Vulkan 传输");
     }
     void buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer &handle, VkDeviceMemory &memory)
     {
@@ -79,6 +70,30 @@ class VulkanContext final : public GraphicsContext
         allocation.memoryTypeIndex =
             memoryType(requirements.memoryTypeBits,
                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (usage & VK_BUFFER_USAGE_TRANSFER_DST_BIT) {
+            VkPhysicalDeviceMemoryProperties properties;
+            vkGetPhysicalDeviceMemoryProperties(physical, &properties);
+            // Readback needs CPU reads; the first coherent type may be uncached
+            // write-combined PCIe memory, appropriate for uploads but very slow here.
+            for (const auto preferred : {VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                               VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
+                                                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+                                         VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                               VK_MEMORY_PROPERTY_HOST_CACHED_BIT)}) {
+                bool found = false;
+                for (uint32_t i = 0; i < properties.memoryTypeCount; ++i) {
+                    if ((requirements.memoryTypeBits & (1u << i)) &&
+                        (properties.memoryTypes[i].propertyFlags & preferred) == preferred) {
+                        allocation.memoryTypeIndex = i;
+                        found = true;
+                        break;
+                    }
+                }
+                if (found)
+                    break;
+            }
+            stagingFlags = properties.memoryTypes[allocation.memoryTypeIndex].propertyFlags;
+        }
         check(vkAllocateMemory(device, &allocation, nullptr, &memory), "分配 Vulkan 传输内存");
         check(vkBindBufferMemory(device, handle, memory, 0), "绑定 Vulkan 传输内存");
     }
@@ -115,6 +130,8 @@ class VulkanContext final : public GraphicsContext
         check(vkCreateImageView(device, &view, nullptr, &targetView), "创建 Vulkan 图像视图");
         buffer(VkDeviceSize(size.width()) * size.height() * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, staging,
                stagingMemory);
+        check(vkMapMemory(device, stagingMemory, 0, VK_WHOLE_SIZE, 0, &stagingPixels),
+              "映射 Vulkan 读回内存");
         m_size = size;
         using Renderer = Csm::Rendering::CubismRenderer_Vulkan;
         Renderer::SetConstantSettings(device, physical, pool, queue, 1,
@@ -125,8 +142,10 @@ class VulkanContext final : public GraphicsContext
                                   {uint32_t(size.width()), uint32_t(size.height())});
     }
     void begin() override {} // Cubism clears the target with transparent black.
-    QImage readback() override
+    QJsonObject readbackTiming() const override { return timing; }
+    QImage readback(uchar *destination = nullptr) override
     {
+        const auto started = RenderProtocol::monotonicNs();
         submit([&](VkCommandBuffer command) {
             VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
             barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -157,42 +176,76 @@ class VulkanContext final : public GraphicsContext
             vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
                                  nullptr, 1, &host, 0, nullptr);
         });
-        QImage image(m_size, QImage::Format_RGBA8888_Premultiplied);
-        void *mapped = nullptr;
-        check(vkMapMemory(device, stagingMemory, 0, image.sizeInBytes(), 0, &mapped), "读取 Vulkan 图像");
-        std::memcpy(image.bits(), mapped, size_t(image.sizeInBytes()));
-        vkUnmapMemory(device, stagingMemory);
+        if (!(stagingFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+            range.memory = stagingMemory;
+            range.size = VK_WHOLE_SIZE;
+            check(vkInvalidateMappedMemoryRanges(device, 1, &range), "刷新 Vulkan 读回缓存");
+        }
+        const auto copiedFrom = RenderProtocol::monotonicNs();
+        QImage image = destination ? QImage(destination, m_size.width(), m_size.height(), m_size.width() * 4,
+                                            QImage::Format_RGBA8888_Premultiplied)
+                                   : QImage(m_size, QImage::Format_RGBA8888_Premultiplied);
+        if (image.isNull())
+            throw std::runtime_error("无法分配 Vulkan 读回图像。");
+        std::memcpy(image.bits(), stagingPixels, size_t(image.sizeInBytes()));
+        timing = {{"gpu_wait_ms", (copiedFrom - started) / 1e6},
+                  {"pixel_copy_ms", (RenderProtocol::monotonicNs() - copiedFrom) / 1e6},
+                  {"host_cached", bool(stagingFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)},
+                  {"host_coherent", bool(stagingFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)}};
         return image;
     }
     Csm::CubismImageVulkan upload(const QImage &image)
     {
+        // Pre-filter the entire texture pyramid once, in premultiplied alpha.
+        // CPU generation also works on devices without linear image blits.
+        // Sampling only level zero aliases badly when a large atlas is shrunk
+        // into a small desktop character (OpenGL already uses mipmaps).
+        std::vector<QImage> levels{image};
+        while (levels.back().width() > 1 || levels.back().height() > 1) {
+            const auto &previous = levels.back();
+            levels.push_back(previous.scaled(std::max(1, previous.width() / 2),
+                                             std::max(1, previous.height() / 2), Qt::IgnoreAspectRatio,
+                                             Qt::SmoothTransformation));
+        }
+        VkDeviceSize uploadBytes = 0;
+        std::vector<VkBufferImageCopy> copies;
+        for (uint32_t level = 0; level < levels.size(); ++level) {
+            const auto &mip = levels[level];
+            VkBufferImageCopy copy{};
+            copy.bufferOffset = uploadBytes;
+            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+            copy.imageExtent = {uint32_t(mip.width()), uint32_t(mip.height()), 1};
+            copies.push_back(copy);
+            uploadBytes += mip.sizeInBytes();
+        }
+        const auto mipCount = uint32_t(levels.size());
         VkBuffer uploadBuffer = VK_NULL_HANDLE;
         VkDeviceMemory uploadMemory = VK_NULL_HANDLE;
         Csm::CubismImageVulkan texture;
         try {
-            buffer(image.sizeInBytes(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, uploadBuffer, uploadMemory);
+            buffer(uploadBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, uploadBuffer, uploadMemory);
             void *mapped = nullptr;
-            check(vkMapMemory(device, uploadMemory, 0, image.sizeInBytes(), 0, &mapped), "上传 Vulkan 纹理");
-            std::memcpy(mapped, image.constBits(), size_t(image.sizeInBytes()));
+            check(vkMapMemory(device, uploadMemory, 0, uploadBytes, 0, &mapped), "上传 Vulkan 纹理");
+            for (size_t level = 0; level < levels.size(); ++level)
+                std::memcpy(static_cast<unsigned char *>(mapped) + copies[level].bufferOffset,
+                            levels[level].constBits(), size_t(levels[level].sizeInBytes()));
             vkUnmapMemory(device, uploadMemory);
-            texture.CreateImage(device, physical, image.width(), image.height(), 1, format,
+            texture.CreateImage(device, physical, image.width(), image.height(), mipCount, format,
                                 VK_IMAGE_TILING_OPTIMAL,
                                 VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-            texture.CreateView(device, format, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+            texture.CreateView(device, format, VK_IMAGE_ASPECT_COLOR_BIT, mipCount);
             texture.CreateSampler(device, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_FILTER_LINEAR,
-                                  VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR, 0, 1);
+                                  VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR, 1, mipCount - 1);
             if (!texture.GetImage() || !texture.GetView() || !texture.GetSampler()) {
                 throw std::runtime_error("创建 Vulkan 纹理失败。");
             }
             submit([&](VkCommandBuffer command) {
-                texture.SetImageLayout(command, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                texture.SetImageLayout(command, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mipCount,
                                        VK_IMAGE_ASPECT_COLOR_BIT);
-                VkBufferImageCopy copy{};
-                copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                copy.imageExtent = {uint32_t(image.width()), uint32_t(image.height()), 1};
                 vkCmdCopyBufferToImage(command, uploadBuffer, texture.GetImage(),
-                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-                texture.SetImageLayout(command, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1,
+                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, copies.size(), copies.data());
+                texture.SetImageLayout(command, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, mipCount,
                                        VK_IMAGE_ASPECT_COLOR_BIT);
             });
         } catch (...) {
@@ -307,6 +360,13 @@ class VulkanContext final : public GraphicsContext
         poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         poolInfo.queueFamilyIndex = family;
         check(vkCreateCommandPool(device, &poolInfo, nullptr, &pool), "创建 Vulkan 命令池");
+        VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        allocation.commandPool = pool;
+        allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocation.commandBufferCount = 1;
+        check(vkAllocateCommandBuffers(device, &allocation, &transferCommand), "分配 Vulkan 传输命令");
+        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        check(vkCreateFence(device, &fenceInfo, nullptr, &transferFence), "创建 Vulkan 传输同步");
         bool foundDepth = false;
         for (auto candidate : {VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT}) {
             VkFormatProperties properties;
@@ -335,6 +395,10 @@ class VulkanContext final : public GraphicsContext
         if (staging) {
             vkDestroyBuffer(device, staging, nullptr);
         }
+        if (stagingPixels) {
+            vkUnmapMemory(device, stagingMemory);
+            stagingPixels = nullptr;
+        }
         if (stagingMemory) {
             vkFreeMemory(device, stagingMemory, nullptr);
         }
@@ -349,6 +413,8 @@ class VulkanContext final : public GraphicsContext
         if (device) {
             vkDeviceWaitIdle(device);
             destroyTarget();
+            if (transferFence)
+                vkDestroyFence(device, transferFence, nullptr);
             if (pool) {
                 vkDestroyCommandPool(device, pool, nullptr);
             }
@@ -363,6 +429,11 @@ class VulkanContext final : public GraphicsContext
     VkQueue queue = VK_NULL_HANDLE;
     uint32_t family = 0;
     VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandBuffer transferCommand = VK_NULL_HANDLE;
+    VkFence transferFence = VK_NULL_HANDLE;
+    void *stagingPixels = nullptr;
+    VkMemoryPropertyFlags stagingFlags = 0;
+    QJsonObject timing;
     VkImage target = VK_NULL_HANDLE;
     VkImageView targetView = VK_NULL_HANDLE;
     VkDeviceMemory targetMemory = VK_NULL_HANDLE, stagingMemory = VK_NULL_HANDLE;

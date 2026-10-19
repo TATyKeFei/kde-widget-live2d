@@ -6,6 +6,7 @@
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQuickWindow>
 #include <QtTest>
 #include <limits>
 
@@ -43,12 +44,29 @@ class CursorTest : public QObject
         QCOMPARE(gaze({-480, 270}, {-960, 540}, screen), QPointF(.5, .5));
         QCOMPARE(gaze({1, 1}, center, {}), QPointF());
         QCOMPARE(gaze({std::numeric_limits<double>::quiet_NaN(), 1}, center, screen), QPointF());
+        using CursorTracking::screenPosition;
+        const QRectF leftScreen(-1920, 0, 1920, 1080);
+        QCOMPARE(screenPosition({-960, 540}, leftScreen), QPointF());
+        QCOMPARE(screenPosition({0, 0}, leftScreen), QPointF(1, 1));
+        QCOMPARE(screenPosition({-1920, 1080}, leftScreen), QPointF(-1, -1));
+        QCOMPARE(screenPosition({-1440, 270}, leftScreen), QPointF(-.5, .5));
+        QCOMPARE(screenPosition({960, 540}, leftScreen), QPointF(1, 0));
     }
 
     void itemModes()
     {
         Live2DItem item;
         QCOMPARE(item.cursorFollowMode(), QStringLiteral("always"));
+        QCOMPARE(item.mouseTrackingMode(), QStringLiteral("screen"));
+        item.setMouseTrackingMode(QStringLiteral("relative"));
+        item.setMouseTrackingMode(QStringLiteral("invalid"));
+        QCOMPARE(item.mouseTrackingMode(), QStringLiteral("relative"));
+        item.setRelativeSensitivity(2);
+        QCOMPARE(item.relativeSensitivity(), 2.0);
+        item.setRelativeSensitivity(std::numeric_limits<double>::quiet_NaN());
+        QCOMPARE(item.relativeSensitivity(), 2.0);
+        item.setRelativeSensitivity(100);
+        QCOMPARE(item.relativeSensitivity(), 5.0);
         item.setCursorFollowMode(QStringLiteral("off"));
         QVERIFY(!item.followCursor());
         item.setCursorFollowMode(QStringLiteral("focused"));
@@ -67,7 +85,9 @@ class CursorTest : public QObject
         engine.rootContext()->setContextProperty(
             QStringLiteral("i18n"),
             QVariant::fromValue(engine.evaluate(QStringLiteral("(function (text) { return text; })"))));
-        QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(LIVE2D_CONFIG_QML)));
+        QQmlComponent component(
+            &engine,
+            QUrl::fromLocalFile(QStringLiteral(LIVE2D_CONFIG_QML)).resolved(QUrl("configFeatures.qml")));
         QTRY_VERIFY_WITH_TIMEOUT(component.status() != QQmlComponent::Loading, 3000);
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
         std::unique_ptr<QObject> config(component.create());
@@ -88,6 +108,133 @@ class CursorTest : public QObject
         QVERIFY(QMetaObject::invokeMethod(selector, "activated", Q_ARG(int, 0)));
         QCOMPARE(config->property("cfg_cursorFollowMode").toString(), QStringLiteral("off"));
         QVERIFY(!config->property("cfg_followCursor").toBool());
+        auto *mouseMode = config->findChild<QObject *>(QStringLiteral("mouseTrackingModeSelector"));
+        QVERIFY(mouseMode);
+        QCOMPARE(mouseMode->property("currentIndex").toInt(), 0);
+        mouseMode->setProperty("currentIndex", 1);
+        QVERIFY(QMetaObject::invokeMethod(mouseMode, "activated", Q_ARG(int, 1)));
+        QCOMPARE(config->property("cfg_mouseTrackingMode").toString(), QStringLiteral("relative"));
+        auto *sensitivity = config->findChild<QObject *>(QStringLiteral("relativeSensitivitySelector"));
+        QVERIFY(sensitivity);
+        QCOMPARE(config->property("cfg_relativeSensitivity").toDouble(), 1.0);
+        config->setProperty("cfg_relativeSensitivity", 2.5);
+        QCOMPARE(sensitivity->property("value").toDouble(), 2.5);
+        auto *input = config->findChild<QObject *>(QStringLiteral("inputModeSelector"));
+        QVERIFY(input);
+        QCOMPARE(config->property("cfg_inputMode").toString(), QStringLiteral("focused"));
+        input->setProperty("currentIndex", 2);
+        QVERIFY(QMetaObject::invokeMethod(input, "activated", Q_ARG(int, 2)));
+        QCOMPARE(config->property("cfg_inputMode").toString(), QStringLiteral("global"));
+        auto *keepAbove = config->findChild<QObject *>(QStringLiteral("keepAboveSelector"));
+        QVERIFY(keepAbove);
+        QVERIFY(!config->property("cfg_keepAbove").toBool());
+        config->setProperty("cfg_keepAbove", true);
+        QVERIFY(keepAbove->property("checked").toBool());
+        keepAbove->setProperty("checked", false);
+        QVERIFY(!config->property("cfg_keepAbove").toBool());
+        auto *clickThrough = config->findChild<QObject *>(QStringLiteral("clickThroughSelector"));
+        QVERIFY(clickThrough);
+        QVERIFY(clickThrough->property("enabled").toBool());
+        config->setProperty("cfg_clickThrough", true);
+        QVERIFY(clickThrough->property("checked").toBool());
+        QQmlComponent rendering(
+            &engine,
+            QUrl::fromLocalFile(QStringLiteral(LIVE2D_CONFIG_QML)).resolved(QUrl("configRendering.qml")));
+        QTRY_VERIFY_WITH_TIMEOUT(rendering.status() != QQmlComponent::Loading, 3000);
+        QVERIFY2(rendering.isReady(), qPrintable(rendering.errorString()));
+        std::unique_ptr<QObject> renderConfig(rendering.create());
+        QVERIFY2(renderConfig, qPrintable(rendering.errorString()));
+        auto *frameRate = renderConfig->findChild<QObject *>(QStringLiteral("frameRateSelector"));
+        QVERIFY(frameRate);
+        renderConfig->setProperty("cfg_frameRate", 0);
+        QCOMPARE(frameRate->property("value").toInt(), 0);
+        QTRY_COMPARE(frameRate->property("displayText").toString(), QStringLiteral("无限制"));
+        renderConfig->setProperty("cfg_frameRate", 144);
+        QCOMPARE(frameRate->property("value").toInt(), 144);
+        frameRate->setProperty("value", 240);
+        QCOMPARE(renderConfig->property("cfg_frameRate").toInt(), 240);
+        QQmlComponent character(&engine, QUrl::fromLocalFile(QStringLiteral(LIVE2D_CONFIG_QML)));
+        QTRY_VERIFY_WITH_TIMEOUT(character.status() != QQmlComponent::Loading, 3000);
+        QVERIFY2(character.isReady(), qPrintable(character.errorString()));
+        std::unique_ptr<QObject> characterConfig(character.create());
+        QVERIFY2(characterConfig, qPrintable(character.errorString()));
+        characterConfig->setProperty("cfg_modelPath", QStringLiteral("file:///tmp/character.model3.json"));
+        QCOMPARE(characterConfig->property("cfg_modelPath").toString(),
+                 QStringLiteral("file:///tmp/character.model3.json"));
+        Live2DItem item;
+        item.setInputMode(QStringLiteral("global"));
+        item.setInputMode(QStringLiteral("unknown"));
+        QCOMPARE(item.inputMode(), QStringLiteral("global"));
+    }
+
+    void desktopClickThrough()
+    {
+        QQmlEngine engine;
+        QQmlComponent component(&engine);
+        component.setData(
+            R"(
+import QtQuick
+Item {
+    id: scene
+    width: 240; height: 120
+    property bool passthrough: false
+    property bool editing: false
+    property int desktopClicks: 0
+    property int widgetClicks: 0
+    property int siblingClicks: 0
+    MouseArea { anchors.fill: parent; onClicked: ++desktopClicks }
+    Item {
+        id: wrapper
+        width: 120; height: 120
+        property Item applet: character
+        MouseArea { anchors.fill: parent; onClicked: ++widgetClicks }
+        Item { id: character; anchors.fill: parent }
+    }
+    MouseArea {
+        x: 120; width: 120; height: 120
+        onClicked: ++siblingClicks
+    }
+    DesktopInputGate {
+        objectName: "gate"
+        targetItem: character
+        active: scene.passthrough
+        editing: scene.editing
+    }
+}
+)",
+            QUrl::fromLocalFile(QStringLiteral(LIVE2D_CONFIG_QML)).resolved(QUrl("DesktopInputTest.qml")));
+        QTRY_VERIFY_WITH_TIMEOUT(component.status() != QQmlComponent::Loading, 3000);
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        std::unique_ptr<QObject> instance(component.create());
+        QVERIFY2(instance, qPrintable(component.errorString()));
+        auto *item = qobject_cast<QQuickItem *>(instance.get());
+        QVERIFY(item);
+        QQuickWindow window;
+        window.resize(240, 120);
+        item->setParentItem(window.contentItem());
+        window.show();
+        QTest::qWait(30);
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, {60, 60});
+        QCOMPARE(item->property("widgetClicks").toInt(), 1);
+        item->setProperty("passthrough", true);
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, {60, 60});
+        QCOMPARE(item->property("desktopClicks").toInt(), 1);
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, {180, 60});
+        QCOMPARE(item->property("siblingClicks").toInt(), 1);
+        item->setProperty("editing", true);
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, {60, 60});
+        QCOMPARE(item->property("widgetClicks").toInt(), 2);
+        item->setProperty("editing", false);
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, {60, 60});
+        QCOMPARE(item->property("desktopClicks").toInt(), 2);
+        item->setProperty("passthrough", false);
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, {60, 60});
+        QCOMPARE(item->property("widgetClicks").toInt(), 3);
+        // Removing the gate must restore the applet container too.
+        item->setProperty("passthrough", true);
+        delete item->findChild<QObject *>(QStringLiteral("gate"));
+        QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, {60, 60});
+        QCOMPARE(item->property("widgetClicks").toInt(), 4);
     }
 
     void receiverLifecycle()
@@ -135,8 +282,9 @@ class CursorTest : public QObject
             var snapshots = [];
             var ack = null;
             var unloads = 0;
+            var callbacks = [];
             function callDBus(service, path, iface, method, value, callback) {
-                if (method === 'update') { snapshots.push(JSON.parse(value)); ack = callback; }
+                if (method === 'update') { snapshots.push(JSON.parse(value)); callbacks.push(callback); ack = callback; }
                 else if (method === 'unloadScript') ++unloads;
             }
         )"));
@@ -150,7 +298,7 @@ class CursorTest : public QObject
         QVERIFY2(!result.isError(), qPrintable(result.toString()));
         const auto run = [&](const QString &code) { return engine.evaluate(code); };
         QVERIFY(run(QStringLiteral("activeTimer.running")).toBool());
-        QCOMPARE(run(QStringLiteral("activeTimer.interval")).toInt(), 33);
+        QCOMPARE(run(QStringLiteral("activeTimer.interval")).toInt(), 8);
         run(QStringLiteral("ticks()"));
         QCOMPARE(run(QStringLiteral("snapshots[0].x")).toInt(), -100);
         QVERIFY(!run(QStringLiteral("snapshots[0].normal")).toBool());
@@ -160,7 +308,12 @@ class CursorTest : public QObject
             "ack(true); workspace.activeWindow = {normalWindow: true, fullScreen: true}; ticks()"));
         QCOMPARE(run(QStringLiteral("snapshots.length")).toInt(), 2);
         QVERIFY(run(QStringLiteral("snapshots[1].normal && snapshots[1].fullscreen")).toBool());
-        run(QStringLiteral("ack(true); for (var i = 0; i < 30; ++i) ticks()"));
+        QVERIFY(run(QStringLiteral("callbacks[0] === callbacks[1]")).toBool());
+        // An unchanged poll must not build a JSON snapshot (or call stringify).
+        run(QStringLiteral("ack(true); JSON.stringify = function () { throw new Error('unexpected "
+                           "stringify'); }; for (var i = 0; i < 124; ++i) ticks()"));
+        QCOMPARE(run(QStringLiteral("snapshots.length")).toInt(), 2);
+        run(QStringLiteral("ticks()"));
         QCOMPARE(run(QStringLiteral("snapshots.length")).toInt(), 3); // Stationary heartbeat.
         run(QStringLiteral("ack(false)"));
         QVERIFY(!run(QStringLiteral("activeTimer.running")).toBool());
@@ -190,7 +343,7 @@ class CursorTest : public QObject
         script.replace("@PLUGIN@", "\"live2d-test\"");
         const auto result = engine.evaluate(QString::fromUtf8(script));
         QVERIFY2(!result.isError(), qPrintable(result.toString()));
-        engine.evaluate(QStringLiteral("for (var i = 0; i < 92; ++i) tick()"));
+        engine.evaluate(QStringLiteral("for (var i = 0; i < 377; ++i) tick()"));
         QVERIFY(engine.evaluate(QStringLiteral("stopped && unloaded")).toBool());
     }
 };

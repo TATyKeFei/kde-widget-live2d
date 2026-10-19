@@ -23,6 +23,8 @@ class DesktopTracker : public QObject, protected QDBusContext
     void unsubscribe(QObject *client);
     const CursorTracking::State &state() const { return m_state; }
     QString errorString() const { return m_error; }
+    qint64 sampleAgeMs() const;
+    qint64 deliveryMs() const { return m_deliveryMs; }
 
   public Q_SLOTS:
     Q_SCRIPTABLE bool update(const QString &json);
@@ -47,5 +49,6 @@ class DesktopTracker : public QObject, protected QDBusContext
     enum class Phase { Idle, Loading, Running, Stopping };
     Phase m_phase = Phase::Idle;
     int m_generation = 0, m_scriptId = -1;
+    qint64 m_sampledMs = 0, m_deliveryMs = 0;
     bool m_registered = false;
 };

@@ -13,27 +13,71 @@ ApplicationWindow {
     color: "#192026"
 
     header: ToolBar {
-        RowLayout {
-            anchors.fill: parent
-            ToolButton {
-                text: qsTr("打开模型…")
-                onClicked: picker.open()
-            }
-            ToolButton {
-                text: character.running ? qsTr("暂停") : qsTr("继续")
-                enabled: character.ready
-                onClicked: character.running = !character.running
-            }
-            ComboBox {
-                model: [qsTr("关闭跟随"), qsTr("聚焦窗口时"), qsTr("窗口非全屏时"), qsTr("始终跟随")]
-                currentIndex: ["off", "focused", "notFullscreen", "always"].indexOf(character.cursorFollowMode)
-                onActivated: character.cursorFollowMode = ["off", "focused", "notFullscreen", "always"][currentIndex]
-            }
-            ComboBox {
+        height: controls.implicitHeight
+        ColumnLayout {
+            id: controls
+            width: parent.width
+            RowLayout {
                 Layout.fillWidth: true
-                model: character.expressions
-                displayText: currentIndex >= 0 ? currentText : qsTr("表情")
-                onActivated: character.setExpression(currentText)
+                ToolButton {
+                    text: qsTr("打开模型…")
+                    onClicked: picker.open()
+                }
+                ToolButton {
+                    text: character.running ? qsTr("暂停") : qsTr("继续")
+                    enabled: character.ready
+                    onClicked: character.running = !character.running
+                }
+                ComboBox {
+                    model: [qsTr("关闭跟随"), qsTr("聚焦窗口时"), qsTr("窗口非全屏时"), qsTr("始终跟随")]
+                    currentIndex: ["off", "focused", "notFullscreen", "always"].indexOf(character.cursorFollowMode)
+                    onActivated: character.cursorFollowMode = ["off", "focused", "notFullscreen", "always"][currentIndex]
+                }
+                ComboBox {
+                    Layout.fillWidth: true
+                    model: character.expressions
+                    displayText: currentIndex >= 0 ? currentText : qsTr("表情")
+                    onActivated: character.setExpression(currentText)
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                ComboBox {
+                    objectName: "previewMouseTrackingMode"
+                    model: [qsTr("屏幕位置"), qsTr("相对位移（FPS 游戏）")]
+                    currentIndex: ["screen", "relative"].indexOf(character.mouseTrackingMode)
+                    onActivated: character.mouseTrackingMode = ["screen", "relative"][currentIndex]
+                }
+                Label { text: qsTr("灵敏度") }
+                Slider {
+                    Layout.fillWidth: true
+                    from: 0.1
+                    to: 5
+                    stepSize: 0.1
+                    value: character.relativeSensitivity
+                    onMoved: character.relativeSensitivity = value
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                ComboBox {
+                    objectName: "previewInputMode"
+                    model: [qsTr("关闭动作按键"), qsTr("聚焦时响应"), qsTr("整个桌面响应")]
+                    currentIndex: ["off", "focused", "global"].indexOf(character.inputMode)
+                    onActivated: character.inputMode = ["off", "focused", "global"][currentIndex]
+                }
+                ComboBox {
+                    id: motionSelector
+                    objectName: "previewMotionSelector"
+                    Layout.fillWidth: true
+                    model: character.motionGroups
+                    displayText: currentIndex >= 0 ? currentText : qsTr("动作")
+                }
+                ToolButton {
+                    text: qsTr("播放动作")
+                    enabled: character.ready && character.running && motionSelector.currentIndex >= 0
+                    onClicked: character.playMotion(motionSelector.currentText)
+                }
             }
         }
     }
@@ -49,12 +93,32 @@ ApplicationWindow {
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton
+        onPressed: {
+            character.forceActiveFocus();
+            character.inputButton("LeftMouseButton", true);
+        }
+        onReleased: character.inputButton("LeftMouseButton", false)
+        onCanceled: character.inputButton("LeftMouseButton", false)
         onPositionChanged: mouse => character.setGaze(mouse.x / width * 2 - 1, 1 - mouse.y / height * 2)
         onExited: character.setGaze(0, 0)
         onClicked: mouse => character.tap(mouse.x / width, mouse.y / height)
         onWheel: wheel => {
             character.zoom += wheel.angleDelta.y > 0 ? 0.05 : -0.05;
             wheel.accepted = true;
+        }
+    }
+    TapHandler {
+        acceptedButtons: Qt.RightButton
+        onPressedChanged: {
+            if (pressed) character.forceActiveFocus();
+            character.inputButton("RightMouseButton", pressed);
+        }
+    }
+    TapHandler {
+        acceptedButtons: Qt.MiddleButton
+        onPressedChanged: {
+            if (pressed) character.forceActiveFocus();
+            character.inputButton("MiddleMouseButton", pressed);
         }
     }
     ColumnLayout {
@@ -81,7 +145,7 @@ ApplicationWindow {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         visible: text.length > 0
-        text: character.trackingError
+        text: [character.trackingError, character.inputError].filter(Boolean).join("\n")
         wrapMode: Text.Wrap
         padding: 8
         color: "#f0f3f6"

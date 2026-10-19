@@ -1,8 +1,8 @@
 // Validate Qt Quick's Vulkan presentation independently of Cubism's device.
-// QRhi is used only by this headless integration test, never by the plugin.
 // clang-format off
 #include <vulkan/vulkan.h>
 // clang-format on
+#include "frametexture.h"
 #include "live2ditem.h"
 #include <QElapsedTimer>
 #include <QGuiApplication>
@@ -29,6 +29,21 @@ class HeadlessVulkan final : public QBasicPlatformVulkanInstance
 
   private:
     QVulkanInstance *owner;
+};
+
+class PresentationTest
+{
+  public:
+    static bool awaitFrame(QGuiApplication &app, Live2DItem *item)
+    {
+        QElapsedTimer timeout;
+        timeout.start();
+        while (!item->m_frameDirty && item->errorString().isEmpty() && timeout.elapsed() < 10000) {
+            app.processEvents();
+            QThread::msleep(2);
+        }
+        return item->m_frameDirty && item->errorString().isEmpty();
+    }
 };
 
 int main(int argc, char **argv)
@@ -62,6 +77,34 @@ int main(int argc, char **argv)
         std::unique_ptr<QRhi> rhi(QRhi::create(QRhi::Vulkan, &params));
         if (!rhi) {
             return 4;
+        }
+        // Upload successive RGBA frames into one allocation and verify alpha.
+        // This uses the same texture implementation as the production item.
+        {
+            QImage pixels(32, 24, QImage::Format_RGBA8888_Premultiplied);
+            pixels.fill(QColor(120, 60, 30, 128));
+            auto frameTexture = FrameTexture::create(rhi.get(), pixels, QRhiTexture::UsedAsTransferSource);
+            if (!frameTexture)
+                return 12;
+            auto *allocation = frameTexture->rhiTexture();
+            for (int frame = 0; frame < 3; ++frame) {
+                pixels.fill(frame % 2 ? QColor(30, 60, 120, 64) : QColor(120, 60, 30, 128));
+                frameTexture->setImage(pixels);
+                QRhiCommandBuffer *command;
+                if (rhi->beginOffscreenFrame(&command) != QRhi::FrameOpSuccess)
+                    return 13;
+                auto *updates = rhi->nextResourceUpdateBatch();
+                frameTexture->commitTextureOperations(rhi.get(), updates);
+                QRhiReadbackResult readback;
+                updates->readBackTexture(QRhiReadbackDescription(allocation), &readback);
+                command->resourceUpdate(updates);
+                rhi->endOffscreenFrame();
+                rhi->finish();
+                const QImage actual(reinterpret_cast<const uchar *>(readback.data.constData()), 32, 24,
+                                    QImage::Format_RGBA8888_Premultiplied);
+                if (allocation != frameTexture->rhiTexture() || actual != pixels)
+                    return 14;
+            }
         }
         QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
         QQuickRenderControl control;
@@ -102,19 +145,23 @@ int main(int argc, char **argv)
             status = 8;
         } else {
             item->setRunning(false);
-            control.polishItems();
-            control.beginFrame();
-            control.sync();
-            control.render();
-            QRhiReadbackResult result;
-            auto *updates = rhi->nextResourceUpdateBatch();
-            updates->readBackTexture(QRhiReadbackDescription(texture.get()), &result);
-            control.commandBuffer()->resourceUpdate(updates);
-            control.endFrame();
-            rhi->finish();
-            const QImage image(reinterpret_cast<const uchar *>(result.data.constData()),
-                               result.pixelSize.width(), result.pixelSize.height(),
-                               QImage::Format_RGBA8888_Premultiplied);
+            const auto render = [&] {
+                control.polishItems();
+                control.beginFrame();
+                control.sync();
+                control.render();
+                QRhiReadbackResult result;
+                auto *updates = rhi->nextResourceUpdateBatch();
+                updates->readBackTexture(QRhiReadbackDescription(texture.get()), &result);
+                control.commandBuffer()->resourceUpdate(updates);
+                control.endFrame();
+                rhi->finish();
+                return QImage(reinterpret_cast<const uchar *>(result.data.constData()),
+                              result.pixelSize.width(), result.pixelSize.height(),
+                              QImage::Format_RGBA8888_Premultiplied)
+                    .copy();
+            };
+            const QImage image = render();
             int opaque = 0, transparent = 0;
             for (int y = 0; y < image.height(); ++y) {
                 for (int x = 0; x < image.width(); ++x) {
@@ -127,6 +174,25 @@ int main(int argc, char **argv)
             }
             qInfo() << "Qt Quick Vulkan presentation, character:" << item->activeBackend()
                     << "opaque:" << opaque << "transparent:" << transparent;
+            // Update an existing texture several times, then change its size.
+            // This catches stale materials, missed uploads, and unsafe storage
+            // reuse which a one-frame smoke test cannot exercise.
+            QImage zoomed;
+            for (int frame = 0; frame < 4 && !status; ++frame) {
+                item->setZoom(frame % 2 ? 1.0 : 1.3);
+                if (!PresentationTest::awaitFrame(app, item)) {
+                    status = 10;
+                    break;
+                }
+                const auto updated = render();
+                if (frame == 0)
+                    zoomed = updated;
+                if (zoomed == image || updated != (frame % 2 ? image : zoomed))
+                    status = 10;
+            }
+            item->setSize(QSizeF(300, 420));
+            if (!PresentationTest::awaitFrame(app, item) || render() == image)
+                status = 11;
         }
         delete item;
         window.setRenderTarget({});

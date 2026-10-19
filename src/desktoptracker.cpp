@@ -5,6 +5,7 @@
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDBusServiceWatcher>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -238,6 +239,11 @@ void DesktopTracker::stopScript()
             });
 }
 
+qint64 DesktopTracker::sampleAgeMs() const
+{
+    return m_sampledMs ? QDateTime::currentMSecsSinceEpoch() - m_sampledMs : -1;
+}
+
 bool DesktopTracker::update(const QString &json)
 {
     if (m_clients.isEmpty() || (calledFromDBus() && message().service() != m_owner))
@@ -249,6 +255,8 @@ bool DesktopTracker::update(const QString &json)
     if (!x.isDouble() || !y.isDouble() || !std::isfinite(x.toDouble()) || !std::isfinite(y.toDouble()) ||
         !object.value("normal").isBool() || !object.value("fullscreen").isBool())
         return false;
+    m_sampledMs = qint64(object.value("sampledMs").toDouble());
+    m_deliveryMs = m_sampledMs ? QDateTime::currentMSecsSinceEpoch() - m_sampledMs : -1;
     m_state = {{x.toDouble(), y.toDouble()},
                object.value("normal").toBool(),
                object.value("fullscreen").toBool(),

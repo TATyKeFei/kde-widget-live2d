@@ -8,6 +8,7 @@ include(GNUInstallDirs)
 include(CTest)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Quick QuickControls2 DBus)
+find_package(LayerShellQt REQUIRED)
 qt_standard_project_setup(REQUIRES 6.5)
 
 set(CUBISM_SDK_ROOT "" CACHE PATH "Extracted Cubism SDK for Native 5 R5 directory")
@@ -63,7 +64,7 @@ function(add_live2d_renderer backend renderer)
     target_link_libraries(cubism_${backend} PUBLIC CubismCore)
     qt_add_executable(live2d-render-${backend}
         src/renderhelper.cpp src/cubismmodel.cpp src/cubismmodel.h
-        src/modelassets.cpp src/modelassets.h src/graphicscontext.h src/renderprotocol.h)
+        src/modelassets.cpp src/modelassets.h src/pointermapping.h src/motionpartopacity.h src/graphicscontext.h src/renderprotocol.h)
     target_include_directories(live2d-render-${backend} PRIVATE src)
     target_link_libraries(live2d-render-${backend} PRIVATE cubism_${backend} Qt6::Gui)
     target_compile_options(live2d-render-${backend} PRIVATE -Wall -Wextra -Wpedantic)
@@ -101,12 +102,25 @@ qt_add_library(live2dbackend SHARED)
 qt_add_qml_module(live2dbackend
     URI org.kde.plasma.live2d VERSION 1.0
     OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/qml/org/kde/plasma/live2d"
-    SOURCES src/live2ditem.h src/live2ditem.cpp src/renderprotocol.h
-            src/cursorstate.h src/desktoptracker.h src/desktoptracker.cpp)
+    SOURCES src/live2ditem.h src/live2ditem.cpp src/renderprotocol.h src/framepacer.h
+            src/renderworker.h src/renderworker.cpp
+            src/cursorstate.h src/relativepointer.h src/desktoptracker.h src/desktoptracker.cpp
+            src/modelinputstate.h src/inputkeys.h src/globalinput.h src/globalinput.cpp
+            src/live2dwindow.h src/live2dwindow.cpp)
 set_source_files_properties(src/kwin-pointer.js PROPERTIES QT_RESOURCE_ALIAS kwin-pointer.js)
 qt_add_resources(live2dbackend cursor_script PREFIX "/live2d" FILES src/kwin-pointer.js)
 target_include_directories(live2dbackend PRIVATE src)
-target_link_libraries(live2dbackend PRIVATE Qt6::Quick Qt6::DBus ${CMAKE_DL_LIBS})
+target_link_libraries(live2dbackend PRIVATE Qt6::Quick Qt6::DBus LayerShellQt::Interface ${CMAKE_DL_LIBS})
+# QRhi's upload API is available from the matching Qt GuiPrivate development
+# module. Retain the public createTextureFromImage path for older/minimal Qt.
+if(Qt6_VERSION VERSION_GREATER_EQUAL 6.6)
+    find_package(Qt6 QUIET COMPONENTS GuiPrivate)
+    if(TARGET Qt6::GuiPrivate)
+        target_sources(live2dbackend PRIVATE src/frametexture.h)
+        target_link_libraries(live2dbackend PRIVATE Qt6::GuiPrivate)
+        target_compile_definitions(live2dbackend PRIVATE LIVE2D_RHI_TEXTURE)
+    endif()
+endif()
 target_compile_definitions(live2dbackend PRIVATE
     LIVE2D_HELPER_BUILD_DIR="${CMAKE_BINARY_DIR}")
 # Resolve installed helpers relative to this module, so staging installs work.
@@ -129,6 +143,7 @@ add_dependencies(live2d-preview live2dbackendplugin)
 target_compile_definitions(live2d-preview PRIVATE LIVE2D_QML_BUILD_DIR="${CMAKE_BINARY_DIR}/qml")
 set_source_files_properties(preview/Main.qml PROPERTIES QT_RESOURCE_ALIAS Main.qml)
 qt_add_resources(live2d-preview preview_qml PREFIX "/preview" FILES preview/Main.qml)
+qt_add_resources(live2d-preview preview_icon PREFIX "/live2d" BASE assets FILES assets/logo.png)
 
 set_target_properties(live2dbackend PROPERTIES INSTALL_RPATH "$ORIGIN")
 set_target_properties(live2dbackendplugin PROPERTIES INSTALL_RPATH "$ORIGIN")
@@ -138,9 +153,19 @@ install(FILES "${CMAKE_BINARY_DIR}/qml/org/kde/plasma/live2d/qmldir"
         DESTINATION "${LIVE2D_QML_INSTALL_DIR}")
 install(TARGETS live2d-preview RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(DIRECTORY package/ DESTINATION "${CMAKE_INSTALL_DATADIR}/plasma/plasmoids/org.kde.plasma.live2d")
+install(FILES assets/logo.png DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/128x128/apps"
+    RENAME org.kde.plasma.live2d.png)
 
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
+    qt_add_executable(framepacer-test tests/framepacer_test.cpp)
+    target_include_directories(framepacer-test PRIVATE src)
+    target_link_libraries(framepacer-test PRIVATE Qt6::Test)
+    add_test(NAME frame-pacing COMMAND framepacer-test)
+    qt_add_executable(globalinput-test tests/globalinput_test.cpp src/globalinput.cpp src/globalinput.h)
+    target_include_directories(globalinput-test PRIVATE src)
+    target_link_libraries(globalinput-test PRIVATE Qt6::Test Qt6::Gui)
+    add_test(NAME model-input COMMAND globalinput-test)
     qt_add_executable(cursor-test tests/cursor_test.cpp)
     set_target_properties(cursor-test PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
     target_include_directories(cursor-test PRIVATE src)
@@ -156,13 +181,34 @@ if(BUILD_TESTING)
     add_test(NAME modelassets COMMAND modelassets-test)
     set(LIVE2D_TEST_MODEL "" CACHE FILEPATH "Optional .model3.json for real rendering and integration tests")
     if(LIVE2D_TEST_MODEL)
+        # Use the selected test model's real MOC for a renderer-independent
+        # check of SDK PartOpacity curve evaluation on the very first frame.
+        file(READ "${LIVE2D_TEST_MODEL}" _test_model_json)
+        string(JSON _test_moc GET "${_test_model_json}" FileReferences Moc)
+        get_filename_component(_test_model_dir "${LIVE2D_TEST_MODEL}" DIRECTORY)
+        qt_add_executable(motion-test tests/motion_test.cpp)
+        target_include_directories(motion-test PRIVATE src)
+        target_link_libraries(motion-test PRIVATE cubism_opengl Qt6::Test OpenGL::EGL)
+        target_compile_definitions(motion-test PRIVATE LIVE2D_TEST_MOC="${_test_model_dir}/${_test_moc}")
+        add_test(NAME motion-part-opacity COMMAND motion-test)
         qt_add_executable(item-test tests/item_test.cpp)
         target_include_directories(item-test PRIVATE src)
         target_link_libraries(item-test PRIVATE live2dbackend Qt6::Quick Qt6::Test)
         add_test(NAME item-lifecycle COMMAND item-test)
         set_tests_properties(item-lifecycle PROPERTIES ENVIRONMENT
             "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;LIBGL_ALWAYS_SOFTWARE=1;LIVE2D_TEST_MODEL=${LIVE2D_TEST_MODEL}")
-        # QRhi is a private Qt API and is confined to the integration test.
+        qt_add_executable(window-test tests/window_test.cpp)
+        set_target_properties(window-test PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+        target_include_directories(window-test PRIVATE src)
+        target_link_libraries(window-test PRIVATE live2dbackend LayerShellQt::Interface Qt6::Quick Qt6::Test)
+        add_dependencies(window-test live2dbackendplugin)
+        target_compile_definitions(window-test PRIVATE
+            LIVE2D_TEST_QML_DIR="${CMAKE_BINARY_DIR}/qml"
+            LIVE2D_FLOATING_QML="${CMAKE_CURRENT_SOURCE_DIR}/package/contents/ui/FloatingCharacter.qml")
+        add_test(NAME floating-window COMMAND window-test)
+        set_tests_properties(floating-window PROPERTIES ENVIRONMENT
+            "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;LIBGL_ALWAYS_SOFTWARE=1;LIVE2D_TEST_MODEL=${LIVE2D_TEST_MODEL}")
+        # Exercise Qt Quick's real QRhi Vulkan presentation without a display.
         if(LIVE2D_BUILD_VULKAN AND Qt6_VERSION VERSION_GREATER_EQUAL 6.6)
             find_package(Qt6 QUIET COMPONENTS GuiPrivate)
             if(TARGET Qt6::GuiPrivate)

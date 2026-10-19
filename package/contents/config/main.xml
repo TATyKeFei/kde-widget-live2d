@@ -10,8 +10,14 @@
         <entry name="followCursor" type="Bool"><default>true</default></entry>
         <!-- Empty migrates the old checkbox on first use. -->
         <entry name="cursorFollowMode" type="String"><default></default></entry>
-        <entry name="frameRate" type="Int"><default>30</default><min>1</min><max>60</max></entry>
+        <entry name="mouseTrackingMode" type="String"><default>screen</default></entry>
+        <entry name="relativeSensitivity" type="Double"><default>1.0</default><min>0.1</min><max>5.0</max></entry>
+        <!-- Zero disables the rendering frame rate limit. -->
+        <entry name="frameRate" type="Int"><default>30</default><min>0</min><max>240</max></entry>
         <entry name="zoom" type="Double"><default>1.0</default><min>0.25</min><max>3.0</max></entry>
         <entry name="idleGroup" type="String"><default>Idle</default></entry>
+        <entry name="inputMode" type="String"><default>focused</default></entry>
+        <entry name="keepAbove" type="Bool"><default>false</default></entry>
+        <entry name="clickThrough" type="Bool"><default>false</default></entry>
     </group>
 </kcfg>

@@ -3,3 +3,5 @@
 /sdk/
 /dist/
 *.user
+
+/live2d-stutter-*.log

@@ -29,6 +29,7 @@ test -x "$bundle_dir/payload/libexec/kde-live2d/live2d-render-vulkan"
 test -x "$bundle_dir/payload/bin/live2d-preview"
 
 install -m 755 "$repo_dir/scripts/install-bundle.sh" "$bundle_dir/install.sh"
+install -m 755 "$repo_dir/scripts/enable-global-input.sh" "$bundle_dir/enable-global-input.sh"
 install -m 644 "$repo_dir/LICENSE" "$bundle_dir/licenses/PROJECT-LICENSE"
 install -m 644 "$sdk_dir/LICENSE.md" "$bundle_dir/licenses/Cubism-SDK.md"
 install -m 644 "$sdk_dir/Core/LICENSE.md" "$bundle_dir/licenses/Cubism-Core.md"

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QPointF>
+#include <QRectF>
 #include <QSizeF>
 #include <QString>
 #include <algorithm>
@@ -58,5 +59,12 @@ inline QPointF gaze(const QPointF &pointer, const QPointF &center, const QSizeF 
     }
     return {std::clamp((pointer.x() - center.x()) * 2 / screen.width(), -1.0, 1.0),
             std::clamp((center.y() - pointer.y()) * 2 / screen.height(), -1.0, 1.0)};
+}
+
+// MousePosition mappings use the character's whole monitor, independent of the
+// widget's placement. This gives both directions their full range near edges.
+inline QPointF screenPosition(const QPointF &pointer, const QRectF &screen)
+{
+    return gaze(pointer, screen.center(), screen.size());
 }
 } // namespace CursorTracking

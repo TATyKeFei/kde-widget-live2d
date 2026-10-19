@@ -32,7 +32,7 @@ jobs:
           pacman -Syu --noconfirm --needed \
             git cmake ninja curl unzip python \
             qt6-base qt6-declarative qt6-svg qt6-wayland \
-            libplasma kirigami ttf-dejavu \
+            libplasma kirigami layer-shell-qt ttf-dejavu \
             mesa vulkan-headers vulkan-icd-loader vulkan-swrast shaderc
           install -d -m 700 "$XDG_RUNTIME_DIR"
 

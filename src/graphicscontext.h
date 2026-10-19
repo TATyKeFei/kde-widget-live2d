@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QImage>
+#include <QJsonObject>
 #include <QSize>
 #include <memory>
 
@@ -12,7 +13,10 @@ class GraphicsContext
     virtual ~GraphicsContext() = default;
     virtual void resize(const QSize &size) = 0;
     virtual void begin() = 0;
-    virtual QImage readback() = 0;
+    // Optional tightly packed RGBA destination owned by the caller. The returned
+    // image may reference it and is valid until that storage is reused.
+    virtual QImage readback(uchar *destination = nullptr) = 0;
+    virtual QJsonObject readbackTiming() const { return {}; }
 };
 
 std::unique_ptr<GraphicsContext> createGraphicsContext();

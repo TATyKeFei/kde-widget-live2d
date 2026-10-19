@@ -6,7 +6,7 @@
         "Name[zh_CN]": "Live2D 桌面伙伴",
         "Description": "A Live2D character on your desktop, rendered with Cubism Native",
         "Description[zh_CN]": "使用 Cubism Native 渲染的 Live2D 桌面角色",
-        "Icon": "face-smile",
+        "Icon": "org.kde.plasma.live2d",
         "Category": "Fun and Games",
         "License": "GPL-3.0-or-later",
         "Version": "0.1.0",

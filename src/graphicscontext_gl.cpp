@@ -2,6 +2,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GL/glew.h>
+#include <cstring>
 #include <stdexcept>
 
 namespace
@@ -92,18 +93,27 @@ class OpenGLContext final : public GraphicsContext
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     }
-    QImage readback() override
+    QImage readback(uchar *destination = nullptr) override
     {
-        QImage image(m_size, QImage::Format_RGBA8888_Premultiplied);
-        glReadPixels(0, 0, m_size.width(), m_size.height(), GL_RGBA, GL_UNSIGNED_BYTE, image.bits());
+        // Keep the bottom-up GL scratch buffer across frames. Flip directly
+        // into shared output instead of allocating and copying a second image.
+        if (m_readback.size() != m_size)
+            m_readback = QImage(m_size, QImage::Format_RGBA8888_Premultiplied);
+        if (m_readback.isNull())
+            throw std::runtime_error("无法分配 OpenGL 读回图像。");
+        glReadPixels(0, 0, m_size.width(), m_size.height(), GL_RGBA, GL_UNSIGNED_BYTE, m_readback.bits());
         if (glGetError() != GL_NO_ERROR) {
             throw std::runtime_error("OpenGL 渲染失败。");
         }
-#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
-        return image.flipped(Qt::Vertical);
-#else
-        return image.mirrored(false, true);
-#endif
+        QImage image = destination ? QImage(destination, m_size.width(), m_size.height(), m_size.width() * 4,
+                                            QImage::Format_RGBA8888_Premultiplied)
+                                   : QImage(m_size, QImage::Format_RGBA8888_Premultiplied);
+        if (image.isNull())
+            throw std::runtime_error("无法分配 OpenGL 输出图像。");
+        const auto stride = size_t(m_size.width()) * 4;
+        for (int y = 0; y < m_size.height(); ++y)
+            std::memcpy(image.scanLine(y), m_readback.constScanLine(m_size.height() - 1 - y), stride);
+        return image;
     }
 
   private:
@@ -150,6 +160,7 @@ class OpenGLContext final : public GraphicsContext
     EGLSurface m_surface = EGL_NO_SURFACE;
     GLuint m_fbo = 0, m_color = 0, m_depth = 0;
     QSize m_size;
+    QImage m_readback;
 };
 } // namespace
 

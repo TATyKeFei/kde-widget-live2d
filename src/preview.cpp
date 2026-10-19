@@ -1,6 +1,7 @@
 #include <QCommandLineParser>
 #include <QDir>
 #include <QGuiApplication>
+#include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickWindow>
@@ -11,6 +12,7 @@ int main(int argc, char **argv)
     QGuiApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("live2d-preview"));
     app.setApplicationVersion(QStringLiteral("0.1.0"));
+    app.setWindowIcon(QIcon(QStringLiteral(":/live2d/logo.png")));
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Live2D 原生渲染预览"));
     parser.addHelpOption();

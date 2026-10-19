@@ -1,6 +1,7 @@
 // Keep Qt OpenGL headers out of this file; their macros conflict with GLEW.
 #include "cubismmodel.h"
 #include "modelassets.h"
+#include "motionpartopacity.h"
 #ifdef LIVE2D_VULKAN
 #include "graphicscontext.h"
 #include <Rendering/Vulkan/CubismDeviceInfo_Vulkan.hpp>
@@ -16,6 +17,7 @@ using ModelRenderer = Csm::Rendering::CubismRenderer_OpenGLES2;
 #include <Id/CubismIdManager.hpp>
 #include <Model/CubismUserModel.hpp>
 #include <Motion/CubismMotion.hpp>
+#include <Motion/CubismMotionQueueEntry.hpp>
 #include <QDebug>
 #include <QFile>
 #include <QImageReader>
@@ -26,6 +28,7 @@ using ModelRenderer = Csm::Rendering::CubismRenderer_OpenGLES2;
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <vector>
 
@@ -159,6 +162,17 @@ class CubismModel::Impl : public Csm::CubismUserModel
         if (!_model) {
             fail(QStringLiteral("无法加载 MOC3；请检查模型是否完整以及 SDK 版本是否兼容。"));
         }
+        auto *ids = Csm::CubismFramework::GetIdManager();
+        for (const auto &mapping : assets.pointerMappings()) {
+            const auto id = ids->GetId(mapping.parameter.toUtf8().constData());
+            // Do not create Cubism's synthetic parameters for stale VTS IDs.
+            for (int index = 0; index < _model->GetParameterCount(); ++index) {
+                if (_model->GetParameterId(index) == id) {
+                    pointerMappings.push_back({mapping, id, index, _model->GetParameterValue(index)});
+                    break;
+                }
+            }
+        }
         if (*settings->GetPhysicsFileName()) {
             const auto data = assets.readJson(QString::fromUtf8(settings->GetPhysicsFileName()));
             LoadPhysics(bytes(data), data.size());
@@ -232,26 +246,97 @@ class CubismModel::Impl : public Csm::CubismUserModel
         }
     }
 
-    ~Impl() override { DeleteRenderer(); }
+    ~Impl() override
+    {
+        // Cached motions outlive every queue entry that references them. Base
+        // managers are destroyed after derived members, so stop them explicitly.
+        _motionManager->StopAllMotions();
+        _expressionManager->StopAllMotions();
+        heldExpressions.clear();
+        DeleteRenderer();
+    }
 
-    bool startMotion(const QString &group, int priority)
+    struct MotionDeleter {
+        void operator()(Csm::ACubismMotion *motion) const { Csm::ACubismMotion::Delete(motion); }
+    };
+    using MotionPtr = std::unique_ptr<Csm::ACubismMotion, MotionDeleter>;
+    struct MotionCache {
+        QByteArray json;
+        std::vector<MotionPtr> instances;
+    };
+
+    // A motion holds mutable playback state in addition to queue-entry state.
+    // Reuse it only after its previous entry has left this manager, preserving
+    // overlapping presses and fade-outs without parsing on every replay.
+    template <typename Loader>
+    Csm::ACubismMotion *cachedMotion(MotionCache &cache, Csm::CubismMotionQueueManager *manager, Loader load)
+    {
+        auto *entries = manager->GetCubismMotionQueueEntries();
+        for (const auto &instance : cache.instances) {
+            bool playing = false;
+            for (Csm::csmUint32 i = 0; i < entries->GetSize(); ++i) {
+                auto *entry = entries->At(i);
+                if (entry && entry->GetCubismMotion() == instance.get()) {
+                    playing = true;
+                    break;
+                }
+            }
+            if (!playing)
+                return instance.get();
+        }
+        MotionPtr instance(load());
+        if (!instance)
+            return nullptr;
+        auto *result = instance.get();
+        cache.instances.push_back(std::move(instance));
+        return result;
+    }
+
+    Csm::ACubismMotion *cachedExpression(const QString &name, int index,
+                                         Csm::CubismExpressionMotionManager *manager, bool held)
+    {
+        // Held expressions use zero fade-in and must not modify the normal
+        // expression's cached object or share its mutable fade weight.
+        auto &cache = held ? heldExpressionCache[name] : expressionCache[name];
+        if (cache.json.isEmpty())
+            cache.json = assets.readJson(QString::fromUtf8(settings->GetExpressionFileName(index)));
+        return cachedMotion(cache, manager, [&] {
+            auto *motion = LoadExpression(bytes(cache.json), cache.json.size(), name.toUtf8().constData());
+            if (motion && held)
+                motion->SetFadeInTime(0);
+            return motion;
+        });
+    }
+
+    bool startMotion(const QString &group, int priority, int requestedIndex = -1)
     {
         const auto name = group.toUtf8();
         const int count = settings->GetMotionCount(name.constData());
-        if (count <= 0 || !_motionManager->ReserveMotion(priority)) {
+        if (count <= 0 || requestedIndex >= count ||
+            (priority < 3 && !_motionManager->ReserveMotion(priority))) {
             return false;
         }
-        const int index = QRandomGenerator::global()->bounded(count);
-        const auto data =
-            assets.readJson(QString::fromUtf8(settings->GetMotionFileName(name.constData(), index)));
-        auto *motion = static_cast<Csm::CubismMotion *>(LoadMotion(
-            bytes(data), data.size(), nullptr, nullptr, nullptr, settings.get(), name.constData(), index));
+        const int index = requestedIndex < 0 ? QRandomGenerator::global()->bounded(count) : requestedIndex;
+        auto &cache = motionCache[{group, index}];
+        if (cache.json.isEmpty()) {
+            cache.json =
+                assets.readJson(QString::fromUtf8(settings->GetMotionFileName(name.constData(), index)));
+            if (!_pose)
+                motionPartOpacity.addMotion(_model, cache.json);
+        }
+        auto *motion = cachedMotion(cache, _motionManager, [&] {
+            auto *loaded = static_cast<Csm::CubismMotion *>(
+                LoadMotion(bytes(cache.json), cache.json.size(), nullptr, nullptr, nullptr, settings.get(),
+                           name.constData(), index));
+            if (loaded)
+                loaded->SetEffectIds(blinkIds, lipIds);
+            return loaded;
+        });
         if (!motion) {
             _motionManager->SetReservePriority(0);
             return false;
         }
-        motion->SetEffectIds(blinkIds, lipIds);
-        _motionManager->StartMotionPriority(motion, true, priority);
+        _motionManager->StartMotionPriority(motion, false, priority);
         return true;
     }
 
@@ -261,34 +346,70 @@ class CubismModel::Impl : public Csm::CubismUserModel
         if (index < 0) {
             return;
         }
-        const auto data = assets.readJson(QString::fromUtf8(settings->GetExpressionFileName(index)));
-        if (auto *motion = LoadExpression(bytes(data), data.size(), name.toUtf8().constData())) {
-            _expressionManager->StartMotion(motion, true);
-        }
+        if (auto *motion = cachedExpression(name, index, _expressionManager, false))
+            _expressionManager->StartMotion(motion, false);
     }
 
-    void draw(float delta, const QSize &size, float zoom, const QPointF &gaze, bool follow,
-              const QString &idle)
+    void expressionActive(const QString &name, bool active)
+    {
+        if (!expressionNames.contains(name))
+            return;
+        auto &manager = heldExpressions[name];
+        if (!manager)
+            manager = std::make_unique<Csm::CubismExpressionMotionManager>();
+        manager->StopAllMotions();
+        if (!active)
+            return;
+        const int index = expressionNames.indexOf(name);
+        if (auto *motion = cachedExpression(name, index, manager.get(), true))
+            manager->StartMotion(motion, false);
+    }
+
+    void draw(float delta, const QSize &size, float zoom, const QPointF &gaze, const QPointF &pointer,
+              bool follow, const QString &idle)
     {
         _model->LoadParameters();
         if (_motionManager->IsFinished() && !idle.isEmpty()) {
             startMotion(idle, 1);
         }
         const bool updated = _motionManager->UpdateMotion(_model, delta);
+        if (!_pose)
+            motionPartOpacity.apply(_model);
         _model->SaveParameters();
         if (!updated && _eyeBlink) {
             _eyeBlink->UpdateParameters(_model, delta);
         }
+        for (auto &entry : pointerMappings) {
+            if (follow) {
+                const double target = std::clamp(entry.mapping.target(pointer),
+                                                 double(_model->GetParameterMinimumValue(entry.index)),
+                                                 double(_model->GetParameterMaximumValue(entry.index)));
+                entry.value = entry.mapping.smooth(entry.value, target, delta);
+                _model->SetParameterValue(entry.index, entry.value);
+            } else {
+                // Mappings are transient, after SaveParameters. Turning follow
+                // off immediately restores the animation's own parameter value.
+                entry.value = _model->GetParameterValue(entry.index);
+            }
+        }
         _expressionManager->UpdateMotion(_model, delta);
+        for (const auto &entry : heldExpressions)
+            entry.second->UpdateMotion(_model, delta);
         elapsed += delta;
         auto *ids = Csm::CubismFramework::GetIdManager();
         _model->AddParameterValue(ids->GetId("ParamBreath"), 0.5f + 0.5f * std::sin(elapsed * 1.8f));
         SetDragging(follow ? gaze.x() : 0, follow ? gaze.y() : 0);
         _dragManager->Update(delta);
-        _model->AddParameterValue(ids->GetId("ParamAngleX"), _dragManager->GetX() * 30);
-        _model->AddParameterValue(ids->GetId("ParamAngleY"), _dragManager->GetY() * 30);
-        _model->AddParameterValue(ids->GetId("ParamEyeBallX"), _dragManager->GetX());
-        _model->AddParameterValue(ids->GetId("ParamEyeBallY"), _dragManager->GetY());
+        const auto addGaze = [&](const char *name, float value) {
+            const auto id = ids->GetId(name);
+            if (std::none_of(pointerMappings.begin(), pointerMappings.end(),
+                             [&](const auto &entry) { return entry.id == id; }))
+                _model->AddParameterValue(id, value);
+        };
+        addGaze("ParamAngleX", _dragManager->GetX() * 30);
+        addGaze("ParamAngleY", _dragManager->GetY() * 30);
+        addGaze("ParamEyeBallX", _dragManager->GetX());
+        addGaze("ParamEyeBallY", _dragManager->GetY());
         if (_physics) {
             _physics->Evaluate(_model, delta);
         }
@@ -335,9 +456,20 @@ class CubismModel::Impl : public Csm::CubismUserModel
     }
 
     ModelAssets assets;
+    struct PointerState {
+        PointerMapping mapping;
+        Csm::CubismIdHandle id;
+        int index;
+        double value;
+    };
+    std::vector<PointerState> pointerMappings;
+    MotionPartOpacity motionPartOpacity;
     std::unique_ptr<Csm::CubismModelSettingJson> settings;
     std::vector<std::unique_ptr<Texture>> textures;
     QStringList expressionNames;
+    std::map<std::pair<QString, int>, MotionCache> motionCache;
+    std::map<QString, MotionCache> expressionCache, heldExpressionCache;
+    std::map<QString, std::unique_ptr<Csm::CubismExpressionMotionManager>> heldExpressions;
     Csm::csmVector<Csm::CubismIdHandle> blinkIds, lipIds;
     Csm::CubismMatrix44 mvp;
     QRectF bounds;
@@ -346,11 +478,22 @@ class CubismModel::Impl : public Csm::CubismUserModel
 
 CubismModel::CubismModel(const QUrl &source, const QSize &size) : d(std::make_unique<Impl>(source, size)) {}
 CubismModel::~CubismModel() = default;
-void CubismModel::draw(float delta, const QSize &size, float zoom, const QPointF &gaze, bool follow,
-                       const QString &idle)
+void CubismModel::draw(float delta, const QSize &size, float zoom, const QPointF &gaze,
+                       const QPointF &pointer, bool follow, const QString &idle)
 {
-    d->draw(delta, size, zoom, gaze, follow, idle);
+    d->draw(delta, size, zoom, gaze, pointer, follow, idle);
 }
 void CubismModel::tap(const QPointF &point) { d->tap(point); }
 void CubismModel::setExpression(const QString &name) { d->expression(name); }
 const QStringList &CubismModel::expressions() const { return d->expressionNames; }
+void CubismModel::setExpressionActive(const QString &name, bool active) { d->expressionActive(name, active); }
+void CubismModel::playMotion(const QString &group, int index) { d->startMotion(group, 3, index); }
+QStringList CubismModel::motionGroups() const
+{
+    QStringList groups;
+    for (int i = 0; i < d->settings->GetMotionGroupCount(); ++i)
+        if (d->settings->GetMotionCount(d->settings->GetMotionGroupName(i)) > 0)
+            groups.append(QString::fromUtf8(d->settings->GetMotionGroupName(i)));
+    return groups;
+}
+const QJsonArray &CubismModel::hotkeys() const { return d->assets.hotkeys(); }
